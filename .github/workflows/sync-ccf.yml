@@ -21,101 +21,336 @@ jobs:
 
       - run: pip install pyyaml requests
 
-      - name: Generate JSON
+      - name: Generate deadlines JSON
         run: |
           python3 << 'PYEOF'
-          import yaml, json, requests, re, os
+          import yaml
+          import json
+          import requests
+          import re
+          import os
           from datetime import datetime, timezone, timedelta
 
+          # ========== 完整分类映射（12个） ==========
           CATEGORIES = {
-              'AI': '人工智能', 'CG': '计算机图形学与多媒体',
-              'DB': '数据库/数据挖掘', 'HI': '人机交互与普适计算',
-              'MX': '交叉/综合/新兴', 'NW': '计算机网络',
-              'SC': '计算机体系结构/并行与分布计算/存储系统',
+              'AI': '人工智能',
+              'CG': '计算机图形学与多媒体',
+              'CT': '计算机科学理论',
+              'DB': '数据库/数据挖掘/内容检索',
+              'DS': '计算机体系结构/并行与分布计算/存储系统',
+              'HI': '人机交互与普适计算',
+              'MX': '交叉/综合/新兴',
+              'NW': '计算机网络',
+              'SC': '计算机系统/高性能计算',
               'SE': '软件工程/系统软件/程序设计语言',
-              'SP': '网络与信息安全', 'TC': '计算机科学理论'
+              'SP': '网络与信息安全',
+              'TC': '计算机科学理论'
           }
 
           API_BASE = "https://api.github.com/repos/ccfddl/ccf-deadlines/contents/conference"
 
-          def fetch(url):
-              resp = requests.get(url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=30)
-              resp.raise_for_status()
-              return resp
+          def fetch(url, retries=3):
+              headers = {
+                  'Accept': 'application/vnd.github.v3+json',
+                  'User-Agent': 'CCF-Deadlines-Sync'
+              }
+              for i in range(retries):
+                  try:
+                      resp = requests.get(url, headers=headers, timeout=30)
+                      resp.raise_for_status()
+                      return resp
+                  except Exception as e:
+                      if i == retries - 1:
+                          raise e
+                      import time
+                      time.sleep(2 ** i)
 
-          all_confs = []
-          
-          # 获取目录
-          dirs = fetch(API_BASE).json()
-          
-          for d in [x for x in dirs if x.get('type')=='dir' and x['name'] in CATEGORIES]:
-              cat = d['name']
-              files = fetch(f"{API_BASE}/{cat}").json()
+          def parse_yaml(text, category):
+              """解析 YAML 文件，返回会议列表"""
+              # 提取 title（会议缩写，如 AAAI, CVPR）
+              title_match = re.search(r'^title:\s*(.+)$', text, re.MULTILINE)
+              title = title_match.group(1).strip() if title_match else ''
               
-              for f in [x for x in files if x['name'].endswith('.yml')]:
-                  text = fetch(f['download_url']).text
+              # 提取 description（会议全称）
+              desc_match = re.search(r'^description:\s*(.+)$', text, re.MULTILINE)
+              description = desc_match.group(1).strip() if desc_match else ''
+              
+              # 提取 rank
+              ccf_match = re.search(r'^ccf:\s*([A-C]|N)$', text, re.MULTILINE)
+              core_match = re.search(r'^core:\s*([A-C]\*?)$', text, re.MULTILINE)
+              thcpl_match = re.search(r'^thcpl:\s*([A-C])$', text, re.MULTILINE)
+              
+              # 提取 dblp
+              dblp_match = re.search(r'^dblp:\s*(\w+)$', text, re.MULTILINE)
+              
+              # 提取所有 timeline
+              # 匹配 confs 数组中的每个条目
+              conf_pattern = r'-\s+year:\s*(\d+).*?(?=-\s+year:|\Z)'
+              conf_blocks = re.findall(conf_pattern, text, re.DOTALL)
+              
+              # 如果上面的正则没匹配到，尝试另一种方式
+              if not conf_blocks:
+                  # 直接匹配 year 和对应的 timeline
+                  year_matches = list(re.finditer(r'^\s*-\s*year:\s*(\d+)', text, re.MULTILINE))
                   
-                  # 解析
-                  title = re.search(r'title:\s*(.+)', text)
-                  desc = re.search(r'description:\s*(.+)', text)
-                  ccf = re.search(r'ccf:\s*([A-C]|N)', text)
-                  
-                  years = re.findall(r'year:\s*(\d+)', text)
-                  deadlines = re.findall(r'deadline:\s*[\'"]?(.+?)[\'"]?$', text, re.M)
-                  dates = re.findall(r'date:\s*(.+)', text)
-                  places = re.findall(r'place:\s*(.+)', text)
-                  links = re.findall(r'link:\s*(.+)', text)
-                  
-                  for i, y in enumerate(years):
-                      if i >= len(deadlines): continue
+                  conferences = []
+                  for i, ym in enumerate(year_matches):
+                      start = ym.start()
+                      end = year_matches[i+1].start() if i+1 < len(year_matches) else len(text)
+                      block = text[start:end]
                       
-                      dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadlines[i])
-                      if dt_match:
-                          y_, m, d, h, mi, s = map(int, dt_match.groups())
-                          dt = datetime(y_, m, d, h, mi, s, tzinfo=timezone.utc) + timedelta(hours=12)
-                          iso = dt.isoformat()
+                      # 在这个 block 中提取 timeline
+                      timeline_matches = list(re.finditer(r'^\s*-\s*abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', block, re.MULTILINE))
+                      if not timeline_matches:
+                          timeline_matches = list(re.finditer(r'^\s*-\s*deadline:\s*[\'"]?(.+?)[\'"]?$', block, re.MULTILINE))
+                      
+                      for tm in timeline_matches:
+                          timeline_start = tm.start()
+                          timeline_end = len(block)
+                          # 找下一个 timeline
+                          next_timeline = re.search(r'^\s*-\s*(?:abstract_deadline|deadline):', block[tm.end():], re.MULTILINE)
+                          if next_timeline:
+                              timeline_end = tm.end() + next_timeline.start()
+                          
+                          timeline_block = block[timeline_start:timeline_end]
+                          
+                          # 提取 deadline
+                          deadline_match = re.search(r'deadline:\s*[\'"]?(.+?)[\'"]?$', timeline_block, re.MULTILINE)
+                          if not deadline_match:
+                              continue
+                          
+                          deadline_str = deadline_match.group(1).strip()
+                          
+                          # 提取 abstract_deadline
+                          abstract_match = re.search(r'abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', timeline_block, re.MULTILINE)
+                          abstract_str = abstract_match.group(1).strip() if abstract_match else None
+                          
+                          # 提取 comment/note
+                          comment_match = re.search(r'comment:\s*(.+)', timeline_block)
+                          comment = comment_match.group(1).strip() if comment_match else ''
+                          
+                          # 解析 deadline 时间
+                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadline_str)
+                          if not dt_match:
+                              continue
+                          
+                          y, m, d, h, mi, s = map(int, dt_match.groups())
+                          
+                          # 原始 UTC-12 时间
+                          raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
+                          # UTC-12 转 UTC+8（中国大陆时间）
+                          # UTC-12 到 UTC+8 相差 20 小时
+                          cn_dt = raw_dt + timedelta(hours=20)
+                          
+                          conferences.append({
+                              'id': f"{title.lower().replace(' ', '-')}-{y}" if title else f"conf-{y}",
+                              'title': title,  # 会议缩写
+                              'description': description,  # 会议全称
+                              'category': category,
+                              'category_name': CATEGORIES.get(category, category),
+                              'year': y,
+                              'deadline': {
+                                  'raw': deadline_str,  # 原始字符串
+                                  'utc_minus_12': raw_dt.isoformat(),  # UTC-12
+                                  'utc_plus_8': cn_dt.isoformat(),  # 北京时间
+                              },
+                              'abstract_deadline': abstract_str,
+                              'comment': comment,
+                              'date': '',
+                              'place': '',
+                              'link': '',
+                              'timezone': 'UTC-12',
+                              'rank': {
+                                  'ccf': ccf_match.group(1) if ccf_match else '',
+                                  'core': core_match.group(1) if core_match else '',
+                                  'thcpl': thcpl_match.group(1) if thcpl_match else '',
+                              },
+                              'dblp': dblp_match.group(1) if dblp_match else ''
+                          })
+                  
+                  return conferences
+              
+              # 如果 conf_blocks 匹配到了，处理每个 block
+              conferences = []
+              for block in conf_blocks:
+                  # 提取 year
+                  year_match = re.search(r'year:\s*(\d+)', block)
+                  if not year_match:
+                      continue
+                  year = int(year_match.group(1))
+                  
+                  # 提取 date
+                  date_match = re.search(r'date:\s*(.+)', block)
+                  date_str = date_match.group(1).strip() if date_match else ''
+                  
+                  # 提取 place
+                  place_match = re.search(r'place:\s*(.+)', block)
+                  place_str = place_match.group(1).strip() if place_match else ''
+                  
+                  # 提取 link
+                  link_match = re.search(r'link:\s*(.+)', block)
+                  link_str = link_match.group(1).strip() if link_match else ''
+                  
+                  # 提取 timeline
+                  timeline_pattern = r'-\s+abstract_deadline:\s*[\'"]?(.+?)[\'"]?\s+deadline:\s*[\'"]?(.+?)[\'"]?'
+                  timelines = re.findall(timeline_pattern, block, re.DOTALL)
+                  
+                  if not timelines:
+                      # 尝试没有 abstract_deadline 的情况
+                      simple_timeline = re.findall(r'-\s+deadline:\s*[\'"]?(.+?)[\'"]?', block, re.MULTILINE)
+                      for dl in simple_timeline:
+                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', dl.strip())
+                          if dt_match:
+                              y, m, d, h, mi, s = map(int, dt_match.groups())
+                              raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
+                              cn_dt = raw_dt + timedelta(hours=20)
+                              
+                              conferences.append({
+                                  'id': f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}",
+                                  'title': title,
+                                  'description': description,
+                                  'category': category,
+                                  'category_name': CATEGORIES.get(category, category),
+                                  'year': year,
+                                  'deadline': {
+                                      'raw': dl.strip(),
+                                      'utc_minus_12': raw_dt.isoformat(),
+                                      'utc_plus_8': cn_dt.isoformat(),
+                                  },
+                                  'abstract_deadline': None,
+                                  'comment': '',
+                                  'date': date_str,
+                                  'place': place_str,
+                                  'link': link_str,
+                                  'timezone': 'UTC-12',
+                                  'rank': {
+                                      'ccf': ccf_match.group(1) if ccf_match else '',
+                                      'core': core_match.group(1) if core_match else '',
+                                      'thcpl': thcpl_match.group(1) if thcpl_match else '',
+                                  },
+                                  'dblp': dblp_match.group(1) if dblp_match else ''
+                              })
+                  else:
+                      for abstract_dl, dl in timelines:
+                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', dl.strip())
+                          if not dt_match:
+                              continue
+                          
+                          y, m, d, h, mi, s = map(int, dt_match.groups())
+                          raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
+                          cn_dt = raw_dt + timedelta(hours=20)
+                          
+                          conferences.append({
+                              'id': f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}",
+                              'title': title,
+                              'description': description,
+                              'category': category,
+                              'category_name': CATEGORIES.get(category, category),
+                              'year': year,
+                              'deadline': {
+                                  'raw': dl.strip(),
+                                  'utc_minus_12': raw_dt.isoformat(),
+                                  'utc_plus_8': cn_dt.isoformat(),
+                              },
+                              'abstract_deadline': abstract_dl.strip(),
+                              'comment': '',
+                              'date': date_str,
+                              'place': place_str,
+                              'link': link_str,
+                              'timezone': 'UTC-12',
+                              'rank': {
+                                  'ccf': ccf_match.group(1) if ccf_match else '',
+                                  'core': core_match.group(1) if core_match else '',
+                                  'thcpl': thcpl_match.group(1) if thcpl_match else '',
+                              },
+                              'dblp': dblp_match.group(1) if dblp_match else ''
+                          })
+              
+              return conferences
+
+          # ========== 主程序 ==========
+          print("🚀 Starting CCF deadlines sync...")
+          all_conferences = []
+          stats = {cat: 0 for cat in CATEGORIES.keys()}
+
+          # 获取所有目录
+          dirs = fetch(API_BASE).json()
+          valid_dirs = [d for d in dirs if d.get('type') == 'dir' and d['name'] in CATEGORIES]
+
+          print(f"📂 Found {len(valid_dirs)} valid categories out of {len(CATEGORIES)} total")
+          print(f"   Categories: {[d['name'] for d in valid_dirs]}")
+
+          for dir_info in valid_dirs:
+              cat = dir_info['name']
+              files = fetch(f"{API_BASE}/{cat}").json()
+              yml_files = [f for f in files if f.get('name', '').endswith('.yml')]
+              
+              print(f"\n📁 {cat} ({CATEGORIES[cat]}): {len(yml_files)} files")
+              
+              for file_info in yml_files:
+                  try:
+                      yaml_text = fetch(file_info['download_url']).text
+                      conferences = parse_yaml(yaml_text, cat)
+                      
+                      if conferences:
+                          all_conferences.extend(conferences)
+                          stats[cat] += len(conferences)
+                          print(f"   ✅ {file_info['name']}: {len(conferences)} conferences")
                       else:
-                          iso = deadlines[i]
-                      
-                      all_confs.append({
-                          'id': f"{title.group(1).strip().lower().replace(' ', '-')}-{y}" if title else f"conf-{y}",
-                          'title': title.group(1).strip() if title else '',
-                          'description': desc.group(1).strip() if desc else '',
-                          'category': cat,
-                          'category_name': CATEGORIES[cat],
-                          'year': int(y),
-                          'deadline': iso,
-                          'date': dates[i] if i < len(dates) else '',
-                          'place': places[i] if i < len(places) else '',
-                          'link': links[i] if i < len(links) else '',
-                          'rank': {'ccf': ccf.group(1) if ccf else ''}
-                      })
+                          print(f"   ⚠️ {file_info['name']}: no conferences parsed")
+                          
+                  except Exception as e:
+                      print(f"   ❌ {file_info['name']}: {e}")
 
           # 过滤未来截稿
           now = datetime.now(timezone.utc)
-          upcoming = [c for c in all_confs if datetime.fromisoformat(c['deadline'].replace('Z','+00:00')) > now]
-          upcoming.sort(key=lambda x: x['deadline'])
+          upcoming = []
+          for conf in all_conferences:
+              try:
+                  deadline = datetime.fromisoformat(conf['deadline']['utc_minus_12'].replace('Z', '+00:00'))
+                  if deadline > now:
+                      upcoming.append(conf)
+              except:
+                  upcoming.append(conf)  # 解析失败也保留
 
+          upcoming.sort(key=lambda x: x['deadline']['utc_minus_12'])
+
+          # 输出统计
+          print(f"\n{'='*50}")
+          print(f"📊 STATISTICS")
+          print(f"{'='*50}")
+          print(f"Total parsed: {len(all_conferences)}")
+          print(f"Upcoming: {len(upcoming)}")
+          print(f"\nBy category:")
+          for cat, count in sorted(stats.items()):
+              if count > 0:
+                  print(f"  {cat} ({CATEGORIES[cat]}): {count}")
+
+          # 写入文件
           os.makedirs('dist', exist_ok=True)
           
-          with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
-              json.dump({
-                  'meta': {
-                      'generated_at': now.isoformat(),
-                      'total': len(all_confs),
-                      'upcoming': len(upcoming)
-                  },
-                  'conferences': upcoming
-              }, f, ensure_ascii=False, indent=2)
+          output = {
+              'meta': {
+                  'generated_at': now.isoformat(),
+                  'total_conferences': len(all_conferences),
+                  'upcoming_count': len(upcoming),
+                  'categories': {k: v for k, v in CATEGORIES.items()},
+                  'source': 'https://github.com/ccfddl/ccf-deadlines'
+              },
+              'conferences': upcoming
+          }
 
-          print(f"Generated: {len(upcoming)} upcoming conferences")
+          with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
+              json.dump(output, f, ensure_ascii=False, indent=2)
+
+          print(f"\n✅ Output written to dist/deadlines.json")
           PYEOF
 
-      # 使用 peaceiris/actions-gh-pages 部署（最稳定）
-      - name: Deploy
+      - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
           publish_branch: gh-pages
           force_orphan: true
+          commit_message: "Update deadlines [skip ci]"
