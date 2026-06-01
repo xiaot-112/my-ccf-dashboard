@@ -1,290 +1,121 @@
 name: Sync CCF Deadlines
 
-# 触发条件
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 每6小时运行一次
-  workflow_dispatch:        # 允许手动触发
-  push:
-    branches: [main]        # 推送时也可触发
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
-# 权限设置
 permissions:
   contents: write
-  pages: write
-  id-token: write
-
-# 并发控制
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
-  sync-and-build:
+  sync:
     runs-on: ubuntu-latest
     
     steps:
-      # ========== 1. 检出代码 ==========
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ========== 2. 设置 Python 环境 ==========
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ========== 3. 安装依赖 ==========
-      - name: Install dependencies
-        run: |
-          pip install pyyaml requests
+      - run: pip install pyyaml requests
 
-      # ========== 4. 拉取并转换数据 ==========
-      - name: Fetch and convert CCF deadlines
+      - name: Generate JSON
         run: |
           python3 << 'PYEOF'
-          import yaml
-          import json
-          import requests
-          import os
-          from datetime import datetime, timezone
+          import yaml, json, requests, re, os
+          from datetime import datetime, timezone, timedelta
 
-          # GitHub API 配置
-          API_BASE = "https://api.github.com/repos/ccfddl/ccf-deadlines/contents/conference"
-          RAW_BASE = "https://raw.githubusercontent.com/ccfddl/ccf-deadlines/main/conference"
-          
-          # 分类映射
           CATEGORIES = {
-              'AI': '人工智能',
-              'CG': '计算机图形学与多媒体',
-              'DB': '数据库/数据挖掘',
-              'HI': '人机交互与普适计算',
-              'MX': '交叉/综合/新兴',
-              'NW': '计算机网络',
+              'AI': '人工智能', 'CG': '计算机图形学与多媒体',
+              'DB': '数据库/数据挖掘', 'HI': '人机交互与普适计算',
+              'MX': '交叉/综合/新兴', 'NW': '计算机网络',
               'SC': '计算机体系结构/并行与分布计算/存储系统',
               'SE': '软件工程/系统软件/程序设计语言',
-              'SP': '网络与信息安全',
-              'TC': '计算机科学理论'
+              'SP': '网络与信息安全', 'TC': '计算机科学理论'
           }
 
-          def fetch_url(url, retries=3):
-              """带重试的 HTTP 请求"""
-              headers = {'Accept': 'application/vnd.github.v3+json'}
-              # 如果有 GitHub Token，取消下面注释
-              # if os.getenv('GITHUB_TOKEN'):
-              #     headers['Authorization'] = f'token {os.getenv("GITHUB_TOKEN")}'
-              
-              for i in range(retries):
-                  try:
-                      resp = requests.get(url, headers=headers, timeout=30)
-                      resp.raise_for_status()
-                      return resp
-                  except Exception as e:
-                      if i == retries - 1:
-                          raise e
-                      import time
-                      time.sleep(2 ** i)
-              return None
+          API_BASE = "https://api.github.com/repos/ccfddl/ccf-deadlines/contents/conference"
 
-          def parse_yaml_content(text, category):
-              """解析单个 YAML 文件"""
-              lines = text.split('\n')
+          def fetch(url):
+              resp = requests.get(url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=30)
+              resp.raise_for_status()
+              return resp
+
+          all_confs = []
+          
+          # 获取目录
+          dirs = fetch(API_BASE).json()
+          
+          for d in [x for x in dirs if x.get('type')=='dir' and x['name'] in CATEGORIES]:
+              cat = d['name']
+              files = fetch(f"{API_BASE}/{cat}").json()
               
-              # 提取基础信息
-              import re
-              title_match = re.search(r'title:\s*(.+)', text)
-              desc_match = re.search(r'description:\s*(.+)', text)
-              ccf_match = re.search(r'ccf:\s*([A-C]|N)', text)
-              core_match = re.search(r'core:\s*([A-C]\*?)', text)
-              thcpl_match = re.search(r'thcpl:\s*([A-C])', text)
-              dblp_match = re.search(r'dblp:\s*(\w+)', text)
-              
-              # 提取所有会议年份
-              year_matches = list(re.finditer(r'year:\s*(\d+)', text))
-              deadline_matches = list(re.finditer(r'deadline:\s*[\'"]?(.+?)[\'"]?$', text, re.MULTILINE))
-              abstract_matches = list(re.finditer(r'abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', text, re.MULTILINE))
-              date_matches = list(re.finditer(r'date:\s*(.+)', text))
-              place_matches = list(re.finditer(r'place:\s*(.+)', text))
-              link_matches = list(re.finditer(r'link:\s*(.+)', text))
-              tz_matches = list(re.finditer(r'timezone:\s*(.+)', text))
-              
-              conferences = []
-              
-              for i in range(len(year_matches)):
-                  if i >= len(deadline_matches):
-                      continue
-                      
-                  deadline_str = deadline_matches[i].group(1).strip()
+              for f in [x for x in files if x['name'].endswith('.yml')]:
+                  text = fetch(f['download_url']).text
                   
-                  # 解析 deadline 为 ISO 格式
-                  try:
-                      dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadline_str)
+                  # 解析
+                  title = re.search(r'title:\s*(.+)', text)
+                  desc = re.search(r'description:\s*(.+)', text)
+                  ccf = re.search(r'ccf:\s*([A-C]|N)', text)
+                  
+                  years = re.findall(r'year:\s*(\d+)', text)
+                  deadlines = re.findall(r'deadline:\s*[\'"]?(.+?)[\'"]?$', text, re.M)
+                  dates = re.findall(r'date:\s*(.+)', text)
+                  places = re.findall(r'place:\s*(.+)', text)
+                  links = re.findall(r'link:\s*(.+)', text)
+                  
+                  for i, y in enumerate(years):
+                      if i >= len(deadlines): continue
+                      
+                      dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadlines[i])
                       if dt_match:
-                          year, month, day, hour, minute, second = map(int, dt_match.groups())
-                          # UTC-12 时区处理
-                          from datetime import timedelta
-                          deadline_dt = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
-                          deadline_dt = deadline_dt + timedelta(hours=12)
-                          deadline_iso = deadline_dt.isoformat()
+                          y_, m, d, h, mi, s = map(int, dt_match.groups())
+                          dt = datetime(y_, m, d, h, mi, s, tzinfo=timezone.utc) + timedelta(hours=12)
+                          iso = dt.isoformat()
                       else:
-                          deadline_iso = deadline_str
-                  except:
-                      deadline_iso = deadline_str
-                  
-                  # abstract deadline
-                  abstract_iso = None
-                  if i < len(abstract_matches):
-                      abs_str = abstract_matches[i].group(1).strip()
-                      try:
-                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', abs_str)
-                          if dt_match:
-                              year, month, day, hour, minute, second = map(int, dt_match.groups())
-                              abs_dt = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
-                              abs_dt = abs_dt + timedelta(hours=12)
-                              abstract_iso = abs_dt.isoformat()
-                      except:
-                          abstract_iso = abs_str
-                  
-                  conf = {
-                      'id': f"{title_match.group(1).strip().lower().replace(' ', '-')}-{year_matches[i].group(1)}" if title_match else f"unknown-{i}",
-                      'title': title_match.group(1).strip() if title_match else '',
-                      'description': desc_match.group(1).strip() if desc_match else '',
-                      'category': category,
-                      'category_name': CATEGORIES.get(category, category),
-                      'year': int(year_matches[i].group(1)),
-                      'deadline': deadline_iso,
-                      'deadline_raw': deadline_str,
-                      'abstract_deadline': abstract_iso,
-                      'abstract_deadline_raw': abstract_matches[i].group(1).strip() if i < len(abstract_matches) else None,
-                      'date': date_matches[i].group(1).strip() if i < len(date_matches) else '',
-                      'place': place_matches[i].group(1).strip() if i < len(place_matches) else '',
-                      'link': link_matches[i].group(1).strip() if i < len(link_matches) else '',
-                      'timezone': tz_matches[i].group(1).strip() if i < len(tz_matches) else 'UTC-12',
-                      'rank': {
-                          'ccf': ccf_match.group(1) if ccf_match else '',
-                          'core': core_match.group(1) if core_match else '',
-                          'thcpl': thcpl_match.group(1) if thcpl_match else '',
-                      },
-                      'dblp': dblp_match.group(1) if dblp_match else '',
-                      'updated_at': datetime.now(timezone.utc).isoformat()
-                  }
-                  conferences.append(conf)
-              
-              return conferences
+                          iso = deadlines[i]
+                      
+                      all_confs.append({
+                          'id': f"{title.group(1).strip().lower().replace(' ', '-')}-{y}" if title else f"conf-{y}",
+                          'title': title.group(1).strip() if title else '',
+                          'description': desc.group(1).strip() if desc else '',
+                          'category': cat,
+                          'category_name': CATEGORIES[cat],
+                          'year': int(y),
+                          'deadline': iso,
+                          'date': dates[i] if i < len(dates) else '',
+                          'place': places[i] if i < len(places) else '',
+                          'link': links[i] if i < len(links) else '',
+                          'rank': {'ccf': ccf.group(1) if ccf else ''}
+                      })
 
-          def main():
-              print("🚀 Starting CCF deadlines sync...")
-              all_conferences = []
-              
-              # 获取所有分类目录
-              print(f"📁 Fetching directory list from {API_BASE}")
-              resp = fetch_url(API_BASE)
-              dirs = resp.json()
-              
-              if not isinstance(dirs, list):
-                  raise ValueError(f"Unexpected API response: {dirs}")
-              
-              # 筛选有效分类
-              valid_dirs = [d for d in dirs if d.get('type') == 'dir' and d.get('name') in CATEGORIES]
-              print(f"📂 Found {len(valid_dirs)} valid categories")
-              
-              for dir_info in valid_dirs:
-                  cat_name = dir_info['name']
-                  cat_api_url = f"{API_BASE}/{cat_name}"
-                  
-                  print(f"  📄 Fetching {cat_name}...")
-                  
-                  try:
-                      files_resp = fetch_url(cat_api_url)
-                      files = files_resp.json()
-                      
-                      if not isinstance(files, list):
-                          print(f"    ⚠️ Invalid response for {cat_name}")
-                          continue
-                      
-                      yml_files = [f for f in files if f.get('name', '').endswith('.yml')]
-                      
-                      for file_info in yml_files:
-                          try:
-                              yaml_resp = fetch_url(file_info['download_url'])
-                              yaml_text = yaml_resp.text
-                              conferences = parse_yaml_content(yaml_text, cat_name)
-                              all_conferences.extend(conferences)
-                              print(f"    ✅ {file_info['name']}: {len(conferences)} conferences")
-                          except Exception as e:
-                              print(f"    ❌ Error parsing {file_info['name']}: {e}")
-                              
-                  except Exception as e:
-                      print(f"    ❌ Error fetching {cat_name}: {e}")
-              
-              # 构建输出数据结构
-              now = datetime.now(timezone.utc)
-              
-              # 过滤未来截稿的会议
-              upcoming = []
-              for conf in all_conferences:
-                  try:
-                      deadline = datetime.fromisoformat(conf['deadline'].replace('Z', '+00:00'))
-                      if deadline > now:
-                          upcoming.append(conf)
-                  except:
-                      # 如果解析失败，保留
-                      upcoming.append(conf)
-              
-              # 按截稿时间排序
-              upcoming.sort(key=lambda x: x['deadline'])
-              
-              output = {
+          # 过滤未来截稿
+          now = datetime.now(timezone.utc)
+          upcoming = [c for c in all_confs if datetime.fromisoformat(c['deadline'].replace('Z','+00:00')) > now]
+          upcoming.sort(key=lambda x: x['deadline'])
+
+          os.makedirs('dist', exist_ok=True)
+          
+          with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
+              json.dump({
                   'meta': {
                       'generated_at': now.isoformat(),
-                      'total_conferences': len(all_conferences),
-                      'upcoming_count': len(upcoming),
-                      'categories': list(CATEGORIES.keys()),
-                      'source': 'https://github.com/ccfddl/ccf-deadlines'
+                      'total': len(all_confs),
+                      'upcoming': len(upcoming)
                   },
                   'conferences': upcoming
-              }
-              
-              # 写入文件
-              os.makedirs('dist', exist_ok=True)
-              
-              with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
-                  json.dump(output, f, ensure_ascii=False, indent=2)
-              
-              # 同时生成一个简化版（纯数组，体积更小）
-              with open('dist/deadlines.min.json', 'w', encoding='utf-8') as f:
-                  json.dump(upcoming, f, ensure_ascii=False)
-              
-              print(f"\n✅ Sync complete!")
-              print(f"   Total: {len(all_conferences)} conferences")
-              print(f"   Upcoming: {len(upcoming)} conferences")
-              print(f"   Output: dist/deadlines.json")
-              
-              # 生成统计信息
-              stats = {}
-              for conf in upcoming:
-                  cat = conf['category']
-                  stats[cat] = stats.get(cat, 0) + 1
-              
-              print(f"\n📊 Category breakdown:")
-              for cat, count in sorted(stats.items()):
-                  print(f"   {cat}: {count}")
+              }, f, ensure_ascii=False, indent=2)
 
-          if __name__ == '__main__':
-              main()
+          print(f"Generated: {len(upcoming)} upcoming conferences")
           PYEOF
 
-      # ========== 5. 设置 GitHub Pages ==========
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      # ========== 6. 上传构建产物 ==========
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      # 使用 peaceiris/actions-gh-pages 部署（最稳定）
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3
         with:
-          path: './dist'
-
-      # ========== 7. 部署到 GitHub Pages ==========
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
