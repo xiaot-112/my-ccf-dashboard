@@ -251,7 +251,7 @@ jobs:
           print(f"📊 STATISTICS")
           print(f"{'='*60}")
           print(f"Total parsed:     {len(all_conferences)}")
-          print(f"Filtered (>{=current_year}): {len(filtered)}")
+          print(f"Filtered (>= {current_year}): {len(filtered)}")
           print(f"Parse errors:     {len(parse_errors)}")
           print(f"\nBy category:")
           for cat, count in sorted(stats.items()):
