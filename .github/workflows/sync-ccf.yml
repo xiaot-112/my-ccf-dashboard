@@ -65,115 +65,76 @@ jobs:
                       import time
                       time.sleep(2 ** i)
 
+          def parse_deadline_to_iso(deadline_str, tz_str):
+              """将 deadline 字符串转换为各时区的 ISO 格式"""
+              if not deadline_str or deadline_str == 'TBD':
+                  return None
+              
+              # 解析时间字符串
+              dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadline_str)
+              if not dt_match:
+                  return None
+              
+              y, m, d, h, mi, s = map(int, dt_match.groups())
+              
+              # 解析时区偏移
+              tz_offset = 0
+              if tz_str:
+                  tz_match = re.match(r'UTC([+-]\d+)', tz_str)
+                  if tz_match:
+                      tz_offset = int(tz_match.group(1))
+                  elif tz_str == 'AoE':
+                      tz_offset = -12  # Anywhere on Earth = UTC-12
+              
+              # 创建带原始时区的时间
+              original_tz = timezone(timedelta(hours=tz_offset))
+              original_dt = datetime(y, m, d, h, mi, s, tzinfo=original_tz)
+              
+              # 转为 UTC
+              utc_dt = original_dt.astimezone(timezone.utc)
+              
+              # 转为 UTC+8 (北京时间)
+              cn_tz = timezone(timedelta(hours=8))
+              cn_dt = original_dt.astimezone(cn_tz)
+              
+              return {
+                  'raw': deadline_str,
+                  'timezone': tz_str or 'UTC-12',
+                  'original': original_dt.isoformat(),
+                  'utc': utc_dt.isoformat(),
+                  'utc_plus_8': cn_dt.isoformat()
+              }
+
           def parse_yaml(text, category):
               """解析 YAML 文件，返回会议列表"""
-              # 提取 title（会议缩写，如 AAAI, CVPR）
               title_match = re.search(r'^title:\s*(.+)$', text, re.MULTILINE)
               title = title_match.group(1).strip() if title_match else ''
               
-              # 提取 description（会议全称）
               desc_match = re.search(r'^description:\s*(.+)$', text, re.MULTILINE)
               description = desc_match.group(1).strip() if desc_match else ''
               
-              # 提取 rank
               ccf_match = re.search(r'^ccf:\s*([A-C]|N)$', text, re.MULTILINE)
               core_match = re.search(r'^core:\s*([A-C]\*?)$', text, re.MULTILINE)
               thcpl_match = re.search(r'^thcpl:\s*([A-C])$', text, re.MULTILINE)
-              
-              # 提取 dblp
               dblp_match = re.search(r'^dblp:\s*(\w+)$', text, re.MULTILINE)
               
-              # 提取所有 timeline
-              # 匹配 confs 数组中的每个条目
-              conf_pattern = r'-\s+year:\s*(\d+).*?(?=-\s+year:|\Z)'
-              conf_blocks = re.findall(conf_pattern, text, re.DOTALL)
+              conferences = []
               
-              # 如果上面的正则没匹配到，尝试另一种方式
-              if not conf_blocks:
-                  # 直接匹配 year 和对应的 timeline
-                  year_matches = list(re.finditer(r'^\s*-\s*year:\s*(\d+)', text, re.MULTILINE))
-                  
-                  conferences = []
-                  for i, ym in enumerate(year_matches):
-                      start = ym.start()
-                      end = year_matches[i+1].start() if i+1 < len(year_matches) else len(text)
-                      block = text[start:end]
-                      
-                      # 在这个 block 中提取 timeline
-                      timeline_matches = list(re.finditer(r'^\s*-\s*abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', block, re.MULTILINE))
-                      if not timeline_matches:
-                          timeline_matches = list(re.finditer(r'^\s*-\s*deadline:\s*[\'"]?(.+?)[\'"]?$', block, re.MULTILINE))
-                      
-                      for tm in timeline_matches:
-                          timeline_start = tm.start()
-                          timeline_end = len(block)
-                          # 找下一个 timeline
-                          next_timeline = re.search(r'^\s*-\s*(?:abstract_deadline|deadline):', block[tm.end():], re.MULTILINE)
-                          if next_timeline:
-                              timeline_end = tm.end() + next_timeline.start()
-                          
-                          timeline_block = block[timeline_start:timeline_end]
-                          
-                          # 提取 deadline
-                          deadline_match = re.search(r'deadline:\s*[\'"]?(.+?)[\'"]?$', timeline_block, re.MULTILINE)
-                          if not deadline_match:
-                              continue
-                          
-                          deadline_str = deadline_match.group(1).strip()
-                          
-                          # 提取 abstract_deadline
-                          abstract_match = re.search(r'abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', timeline_block, re.MULTILINE)
-                          abstract_str = abstract_match.group(1).strip() if abstract_match else None
-                          
-                          # 提取 comment/note
-                          comment_match = re.search(r'comment:\s*(.+)', timeline_block)
-                          comment = comment_match.group(1).strip() if comment_match else ''
-                          
-                          # 解析 deadline 时间
-                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadline_str)
-                          if not dt_match:
-                              continue
-                          
-                          y, m, d, h, mi, s = map(int, dt_match.groups())
-                          
-                          # 原始 UTC-12 时间
-                          raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
-                          # UTC-12 转 UTC+8（中国大陆时间）
-                          # UTC-12 到 UTC+8 相差 20 小时
-                          cn_dt = raw_dt + timedelta(hours=20)
-                          
-                          conferences.append({
-                              'id': f"{title.lower().replace(' ', '-')}-{y}" if title else f"conf-{y}",
-                              'title': title,  # 会议缩写
-                              'description': description,  # 会议全称
-                              'category': category,
-                              'category_name': CATEGORIES.get(category, category),
-                              'year': y,
-                              'deadline': {
-                                  'raw': deadline_str,  # 原始字符串
-                                  'utc_minus_12': raw_dt.isoformat(),  # UTC-12
-                                  'utc_plus_8': cn_dt.isoformat(),  # 北京时间
-                              },
-                              'abstract_deadline': abstract_str,
-                              'comment': comment,
-                              'date': '',
-                              'place': '',
-                              'link': '',
-                              'timezone': 'UTC-12',
-                              'rank': {
-                                  'ccf': ccf_match.group(1) if ccf_match else '',
-                                  'core': core_match.group(1) if core_match else '',
-                                  'thcpl': thcpl_match.group(1) if thcpl_match else '',
-                              },
-                              'dblp': dblp_match.group(1) if dblp_match else ''
-                          })
-                  
+              # 匹配 confs 数组中的每个条目
+              # 先找到 confs: 后面的所有内容
+              confs_match = re.search(r'confs:\s*(.*?)(?=\n\w+:|$)', text, re.DOTALL)
+              if not confs_match:
                   return conferences
               
-              # 如果 conf_blocks 匹配到了，处理每个 block
-              conferences = []
-              for block in conf_blocks:
-                  # 提取 year
+              confs_text = confs_match.group(1)
+              
+              # 按 year 分割每个会议条目
+              year_blocks = re.split(r'(?=\n\s*-\s*year:)', confs_text)
+              
+              for block in year_blocks:
+                  if not block.strip() or 'year:' not in block:
+                      continue
+                  
                   year_match = re.search(r'year:\s*(\d+)', block)
                   if not year_match:
                       continue
@@ -191,80 +152,70 @@ jobs:
                   link_match = re.search(r'link:\s*(.+)', block)
                   link_str = link_match.group(1).strip() if link_match else ''
                   
-                  # 提取 timeline
-                  timeline_pattern = r'-\s+abstract_deadline:\s*[\'"]?(.+?)[\'"]?\s+deadline:\s*[\'"]?(.+?)[\'"]?'
-                  timelines = re.findall(timeline_pattern, block, re.DOTALL)
+                  # 提取 timezone（会议级别的默认时区）
+                  tz_match = re.search(r'timezone:\s*(.+)', block)
+                  default_tz = tz_match.group(1).strip() if tz_match else 'UTC-12'
                   
-                  if not timelines:
-                      # 尝试没有 abstract_deadline 的情况
-                      simple_timeline = re.findall(r'-\s+deadline:\s*[\'"]?(.+?)[\'"]?', block, re.MULTILINE)
-                      for dl in simple_timeline:
-                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', dl.strip())
-                          if dt_match:
-                              y, m, d, h, mi, s = map(int, dt_match.groups())
-                              raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
-                              cn_dt = raw_dt + timedelta(hours=20)
-                              
-                              conferences.append({
-                                  'id': f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}",
-                                  'title': title,
-                                  'description': description,
-                                  'category': category,
-                                  'category_name': CATEGORIES.get(category, category),
-                                  'year': year,
-                                  'deadline': {
-                                      'raw': dl.strip(),
-                                      'utc_minus_12': raw_dt.isoformat(),
-                                      'utc_plus_8': cn_dt.isoformat(),
-                                  },
-                                  'abstract_deadline': None,
-                                  'comment': '',
-                                  'date': date_str,
-                                  'place': place_str,
-                                  'link': link_str,
-                                  'timezone': 'UTC-12',
-                                  'rank': {
-                                      'ccf': ccf_match.group(1) if ccf_match else '',
-                                      'core': core_match.group(1) if core_match else '',
-                                      'thcpl': thcpl_match.group(1) if thcpl_match else '',
-                                  },
-                                  'dblp': dblp_match.group(1) if dblp_match else ''
-                              })
-                  else:
-                      for abstract_dl, dl in timelines:
-                          dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', dl.strip())
-                          if not dt_match:
-                              continue
-                          
-                          y, m, d, h, mi, s = map(int, dt_match.groups())
-                          raw_dt = datetime(y, m, d, h, mi, s, tzinfo=timezone.utc)
-                          cn_dt = raw_dt + timedelta(hours=20)
-                          
-                          conferences.append({
-                              'id': f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}",
-                              'title': title,
-                              'description': description,
-                              'category': category,
-                              'category_name': CATEGORIES.get(category, category),
-                              'year': year,
-                              'deadline': {
-                                  'raw': dl.strip(),
-                                  'utc_minus_12': raw_dt.isoformat(),
-                                  'utc_plus_8': cn_dt.isoformat(),
-                              },
-                              'abstract_deadline': abstract_dl.strip(),
-                              'comment': '',
-                              'date': date_str,
-                              'place': place_str,
-                              'link': link_str,
-                              'timezone': 'UTC-12',
-                              'rank': {
-                                  'ccf': ccf_match.group(1) if ccf_match else '',
-                                  'core': core_match.group(1) if core_match else '',
-                                  'thcpl': thcpl_match.group(1) if thcpl_match else '',
-                              },
-                              'dblp': dblp_match.group(1) if dblp_match else ''
-                          })
+                  # 提取 timeline 数组
+                  timeline_match = re.search(r'timeline:\s*(.*?)(?=\n\s*\w+:|$)', block, re.DOTALL)
+                  if not timeline_match:
+                      continue
+                  
+                  timeline_text = timeline_match.group(1)
+                  
+                  # 分割每个 timeline 条目
+                  timeline_entries = re.split(r'(?=\n\s*-\s*(?:abstract_deadline|deadline|comment):)', timeline_text)
+                  
+                  for entry in timeline_entries:
+                      if not entry.strip():
+                          continue
+                      
+                      # 提取 abstract_deadline
+                      abs_match = re.search(r'abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', entry, re.MULTILINE)
+                      abs_str = abs_match.group(1).strip() if abs_match else None
+                      
+                      # 提取 deadline
+                      dl_match = re.search(r'deadline:\s*[\'"]?(.+?)[\'"]?$', entry, re.MULTILINE)
+                      if not dl_match:
+                          continue
+                      dl_str = dl_match.group(1).strip()
+                      
+                      # 提取 comment
+                      comment_match = re.search(r'comment:\s*(.+)', entry)
+                      comment_str = comment_match.group(1).strip() if comment_match else ''
+                      
+                      # 解析 deadline 时间
+                      deadline_info = parse_deadline_to_iso(dl_str, default_tz)
+                      if not deadline_info:
+                          continue
+                      
+                      # 解析 abstract deadline
+                      abs_info = None
+                      if abs_str:
+                          abs_info = parse_deadline_to_iso(abs_str, default_tz)
+                      
+                      conf_id = f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}"
+                      
+                      conferences.append({
+                          'id': conf_id,
+                          'title': title,
+                          'description': description,
+                          'category': category,
+                          'category_name': CATEGORIES.get(category, category),
+                          'year': year,
+                          'deadline': deadline_info,
+                          'abstract_deadline': abs_info,
+                          'comment': comment_str,
+                          'date': date_str,
+                          'place': place_str,
+                          'link': link_str,
+                          'rank': {
+                              'ccf': ccf_match.group(1) if ccf_match else '',
+                              'core': core_match.group(1) if core_match else '',
+                              'thcpl': thcpl_match.group(1) if thcpl_match else '',
+                          },
+                          'dblp': dblp_match.group(1) if dblp_match else ''
+                      })
               
               return conferences
 
@@ -272,13 +223,14 @@ jobs:
           print("🚀 Starting CCF deadlines sync...")
           all_conferences = []
           stats = {cat: 0 for cat in CATEGORIES.keys()}
+          parse_errors = []
 
           # 获取所有目录
           dirs = fetch(API_BASE).json()
           valid_dirs = [d for d in dirs if d.get('type') == 'dir' and d['name'] in CATEGORIES]
 
           print(f"📂 Found {len(valid_dirs)} valid categories out of {len(CATEGORIES)} total")
-          print(f"   Categories: {[d['name'] for d in valid_dirs]}")
+          print(f"   Categories: {sorted([d['name'] for d in valid_dirs])}")
 
           for dir_info in valid_dirs:
               cat = dir_info['name']
@@ -300,31 +252,39 @@ jobs:
                           print(f"   ⚠️ {file_info['name']}: no conferences parsed")
                           
                   except Exception as e:
+                      parse_errors.append(f"{cat}/{file_info['name']}: {e}")
                       print(f"   ❌ {file_info['name']}: {e}")
 
-          # 过滤未来截稿
+          # 过滤未来截稿的会议
           now = datetime.now(timezone.utc)
           upcoming = []
           for conf in all_conferences:
               try:
-                  deadline = datetime.fromisoformat(conf['deadline']['utc_minus_12'].replace('Z', '+00:00'))
-                  if deadline > now:
+                  deadline_utc = datetime.fromisoformat(conf['deadline']['utc'])
+                  if deadline_utc > now:
                       upcoming.append(conf)
-              except:
+              except Exception as e:
+                  print(f"Warning: Could not parse deadline for {conf['id']}: {e}")
                   upcoming.append(conf)  # 解析失败也保留
 
-          upcoming.sort(key=lambda x: x['deadline']['utc_minus_12'])
+          upcoming.sort(key=lambda x: x['deadline']['utc'])
 
           # 输出统计
-          print(f"\n{'='*50}")
+          print(f"\n{'='*60}")
           print(f"📊 STATISTICS")
-          print(f"{'='*50}")
-          print(f"Total parsed: {len(all_conferences)}")
-          print(f"Upcoming: {len(upcoming)}")
+          print(f"{'='*60}")
+          print(f"Total parsed:     {len(all_conferences)}")
+          print(f"Upcoming:         {len(upcoming)}")
+          print(f"Parse errors:     {len(parse_errors)}")
           print(f"\nBy category:")
           for cat, count in sorted(stats.items()):
               if count > 0:
-                  print(f"  {cat} ({CATEGORIES[cat]}): {count}")
+                  print(f"  {cat:3s} ({CATEGORIES[cat][:20]:20s}): {count:3d}")
+          
+          if parse_errors:
+              print(f"\n⚠️ Parse errors ({len(parse_errors)}):")
+              for err in parse_errors[:10]:
+                  print(f"  {err}")
 
           # 写入文件
           os.makedirs('dist', exist_ok=True)
@@ -334,7 +294,7 @@ jobs:
                   'generated_at': now.isoformat(),
                   'total_conferences': len(all_conferences),
                   'upcoming_count': len(upcoming),
-                  'categories': {k: v for k, v in CATEGORIES.items()},
+                  'categories': CATEGORIES,
                   'source': 'https://github.com/ccfddl/ccf-deadlines'
               },
               'conferences': upcoming
@@ -343,7 +303,7 @@ jobs:
           with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
               json.dump(output, f, ensure_ascii=False, indent=2)
 
-          print(f"\n✅ Output written to dist/deadlines.json")
+          print(f"\n✅ Output: dist/deadlines.json ({len(upcoming)} upcoming conferences)")
           PYEOF
 
       - name: Deploy to GitHub Pages
