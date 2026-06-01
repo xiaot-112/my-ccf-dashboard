@@ -67,7 +67,6 @@ jobs:
               """从 date 字段提取年份，如 'February 22 - March 1, 2022' -> 2022"""
               if not date_str:
                   return None
-              # 匹配最后的 4 位数字年份
               match = re.search(r'(\d{4})\s*$', date_str)
               if match:
                   return int(match.group(1))
@@ -83,8 +82,7 @@ jobs:
               except ValueError:
                   return None
               
-              # 解析时区偏移
-              tz_offset = -12  # 默认 UTC-12 (AoE)
+              tz_offset = -12
               if tz_str:
                   if tz_str == 'AoE':
                       tz_offset = -12
@@ -94,24 +92,25 @@ jobs:
                       except:
                           pass
               
-              # 创建带原始时区的时间
               original_tz = timezone(timedelta(hours=tz_offset))
               original_dt = dt.replace(tzinfo=original_tz)
               
-              # 转为 UTC+8 (北京时间)
               cn_tz = timezone(timedelta(hours=8))
               cn_dt = original_dt.astimezone(cn_tz)
               
               return cn_dt.isoformat()
 
           def parse_yaml_file(text, category):
-              """使用 PyYAML 正确解析 YAML 文件"""
+              """使用 PyYAML 正确解析 YAML 文件（支持根节点为列表）"""
               try:
                   data = yaml.safe_load(text)
               except Exception as e:
                   print(f"    ⚠️ YAML parse error: {e}")
                   return []
               
+              # 根节点可能是列表或字典
+              if isinstance(data, list) and len(data) > 0:
+                  data = data[0]
               if not data or not isinstance(data, dict):
                   return []
               
@@ -134,17 +133,14 @@ jobs:
                   if not year:
                       continue
                   
-                  # 获取会议基本信息
                   conf_id = conf.get('id', f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}")
                   link = conf.get('link', '')
                   date_str = conf.get('date', '')
                   place = conf.get('place', '')
                   conf_timezone = conf.get('timezone', 'UTC-12')
                   
-                  # 从 date 字段提取会议召开年份
                   conference_year = extract_year_from_date(date_str) or year
                   
-                  # 处理 timeline
                   timeline = conf.get('timeline', [])
                   if not isinstance(timeline, list):
                       if isinstance(timeline, dict):
@@ -164,12 +160,10 @@ jobs:
                       comment = entry.get('comment', '')
                       tz = entry.get('timezone', conf_timezone)
                       
-                      # 转换 deadline 为 UTC+8
                       deadline_iso = convert_to_utc8(deadline_str, tz)
                       if not deadline_iso:
                           continue
                       
-                      # 转换 abstract deadline
                       abstract_iso = None
                       if abstract_str:
                           abstract_iso = convert_to_utc8(abstract_str, tz)
@@ -203,7 +197,6 @@ jobs:
           stats = {cat: 0 for cat in CATEGORIES.keys()}
           parse_errors = []
 
-          # 获取所有目录
           dirs = fetch(API_BASE).json()
           valid_dirs = [d for d in dirs if d.get('type') == 'dir' and d['name'] in CATEGORIES]
 
@@ -233,11 +226,8 @@ jobs:
                       parse_errors.append(f"{cat}/{file_info['name']}: {e}")
                       print(f"   ❌ {file_info['name']}: {e}")
 
-          # ========== 不过滤，展示所有会议 ==========
-          # 按截稿时间排序
           all_conferences.sort(key=lambda x: x['deadline'])
 
-          # 输出统计
           print(f"\n{'='*60}")
           print(f"📊 STATISTICS")
           print(f"{'='*60}")
@@ -253,7 +243,6 @@ jobs:
               for err in parse_errors[:10]:
                   print(f"  {err}")
 
-          # 写入文件
           os.makedirs('dist', exist_ok=True)
           
           output = {
