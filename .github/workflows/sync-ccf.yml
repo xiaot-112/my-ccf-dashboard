@@ -27,7 +27,6 @@ jobs:
           import yaml
           import json
           import requests
-          import re
           import os
           from datetime import datetime, timezone, timedelta
 
@@ -66,155 +65,122 @@ jobs:
                       time.sleep(2 ** i)
 
           def parse_deadline_to_iso(deadline_str, tz_str):
-              """将 deadline 字符串转换为各时区的 ISO 格式"""
+              """将 deadline 字符串转换为 UTC+8 ISO 格式"""
               if not deadline_str or deadline_str == 'TBD':
                   return None
               
               # 解析时间字符串
-              dt_match = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', deadline_str)
-              if not dt_match:
+              try:
+                  dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
+              except ValueError:
                   return None
               
-              y, m, d, h, mi, s = map(int, dt_match.groups())
-              
               # 解析时区偏移
-              tz_offset = 0
+              tz_offset = -12  # 默认 UTC-12 (AoE)
               if tz_str:
-                  tz_match = re.match(r'UTC([+-]\d+)', tz_str)
-                  if tz_match:
-                      tz_offset = int(tz_match.group(1))
-                  elif tz_str == 'AoE':
-                      tz_offset = -12  # Anywhere on Earth = UTC-12
+                  if tz_str == 'AoE':
+                      tz_offset = -12
+                  elif tz_str.startswith('UTC'):
+                      try:
+                          tz_offset = int(tz_str[3:])
+                      except:
+                          pass
               
               # 创建带原始时区的时间
               original_tz = timezone(timedelta(hours=tz_offset))
-              original_dt = datetime(y, m, d, h, mi, s, tzinfo=original_tz)
-              
-              # 转为 UTC
-              utc_dt = original_dt.astimezone(timezone.utc)
+              original_dt = dt.replace(tzinfo=original_tz)
               
               # 转为 UTC+8 (北京时间)
               cn_tz = timezone(timedelta(hours=8))
               cn_dt = original_dt.astimezone(cn_tz)
               
-              return {
-                  'raw': deadline_str,
-                  'timezone': tz_str or 'UTC-12',
-                  'original': original_dt.isoformat(),
-                  'utc': utc_dt.isoformat(),
-                  'utc_plus_8': cn_dt.isoformat()
-              }
+              return cn_dt.isoformat()
 
-          def parse_yaml(text, category):
-              """解析 YAML 文件，返回会议列表"""
-              title_match = re.search(r'^title:\s*(.+)$', text, re.MULTILINE)
-              title = title_match.group(1).strip() if title_match else ''
+          def parse_yaml_file(text, category):
+              """使用 PyYAML 正确解析 YAML 文件"""
+              try:
+                  data = yaml.safe_load(text)
+              except Exception as e:
+                  print(f"    ⚠️ YAML parse error: {e}")
+                  return []
               
-              desc_match = re.search(r'^description:\s*(.+)$', text, re.MULTILINE)
-              description = desc_match.group(1).strip() if desc_match else ''
+              if not data or not isinstance(data, dict):
+                  return []
               
-              ccf_match = re.search(r'^ccf:\s*([A-C]|N)$', text, re.MULTILINE)
-              core_match = re.search(r'^core:\s*([A-C]\*?)$', text, re.MULTILINE)
-              thcpl_match = re.search(r'^thcpl:\s*([A-C])$', text, re.MULTILINE)
-              dblp_match = re.search(r'^dblp:\s*(\w+)$', text, re.MULTILINE)
+              title = data.get('title', '')
+              description = data.get('description', '')
+              rank = data.get('rank', {})
+              dblp = data.get('dblp', '')
               
               conferences = []
               
-              # 匹配 confs 数组中的每个条目
-              # 先找到 confs: 后面的所有内容
-              confs_match = re.search(r'confs:\s*(.*?)(?=\n\w+:|$)', text, re.DOTALL)
-              if not confs_match:
-                  return conferences
+              confs = data.get('confs', [])
+              if not isinstance(confs, list):
+                  return []
               
-              confs_text = confs_match.group(1)
-              
-              # 按 year 分割每个会议条目
-              year_blocks = re.split(r'(?=\n\s*-\s*year:)', confs_text)
-              
-              for block in year_blocks:
-                  if not block.strip() or 'year:' not in block:
+              for conf in confs:
+                  if not isinstance(conf, dict):
                       continue
                   
-                  year_match = re.search(r'year:\s*(\d+)', block)
-                  if not year_match:
-                      continue
-                  year = int(year_match.group(1))
-                  
-                  # 提取 date
-                  date_match = re.search(r'date:\s*(.+)', block)
-                  date_str = date_match.group(1).strip() if date_match else ''
-                  
-                  # 提取 place
-                  place_match = re.search(r'place:\s*(.+)', block)
-                  place_str = place_match.group(1).strip() if place_match else ''
-                  
-                  # 提取 link
-                  link_match = re.search(r'link:\s*(.+)', block)
-                  link_str = link_match.group(1).strip() if link_match else ''
-                  
-                  # 提取 timezone（会议级别的默认时区）
-                  tz_match = re.search(r'timezone:\s*(.+)', block)
-                  default_tz = tz_match.group(1).strip() if tz_match else 'UTC-12'
-                  
-                  # 提取 timeline 数组
-                  timeline_match = re.search(r'timeline:\s*(.*?)(?=\n\s*\w+:|$)', block, re.DOTALL)
-                  if not timeline_match:
+                  year = conf.get('year')
+                  if not year:
                       continue
                   
-                  timeline_text = timeline_match.group(1)
+                  # 获取会议基本信息
+                  conf_id = conf.get('id', f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}")
+                  link = conf.get('link', '')
+                  date_str = conf.get('date', '')
+                  place = conf.get('place', '')
                   
-                  # 分割每个 timeline 条目
-                  timeline_entries = re.split(r'(?=\n\s*-\s*(?:abstract_deadline|deadline|comment):)', timeline_text)
+                  # 处理 timeline
+                  timeline = conf.get('timeline', [])
+                  if not isinstance(timeline, list):
+                      # 兼容单个对象的情况
+                      if isinstance(timeline, dict):
+                          timeline = [timeline]
+                      else:
+                          continue
                   
-                  for entry in timeline_entries:
-                      if not entry.strip():
+                  for entry in timeline:
+                      if not isinstance(entry, dict):
                           continue
                       
-                      # 提取 abstract_deadline
-                      abs_match = re.search(r'abstract_deadline:\s*[\'"]?(.+?)[\'"]?$', entry, re.MULTILINE)
-                      abs_str = abs_match.group(1).strip() if abs_match else None
-                      
-                      # 提取 deadline
-                      dl_match = re.search(r'deadline:\s*[\'"]?(.+?)[\'"]?$', entry, re.MULTILINE)
-                      if not dl_match:
-                          continue
-                      dl_str = dl_match.group(1).strip()
-                      
-                      # 提取 comment
-                      comment_match = re.search(r'comment:\s*(.+)', entry)
-                      comment_str = comment_match.group(1).strip() if comment_match else ''
-                      
-                      # 解析 deadline 时间
-                      deadline_info = parse_deadline_to_iso(dl_str, default_tz)
-                      if not deadline_info:
+                      deadline_str = entry.get('deadline')
+                      if not deadline_str:
                           continue
                       
-                      # 解析 abstract deadline
-                      abs_info = None
-                      if abs_str:
-                          abs_info = parse_deadline_to_iso(abs_str, default_tz)
+                      abstract_str = entry.get('abstract_deadline')
+                      comment = entry.get('comment', '')
+                      tz = entry.get('timezone', conf.get('timezone', 'UTC-12'))
                       
-                      conf_id = f"{title.lower().replace(' ', '-')}-{year}" if title else f"conf-{year}"
+                      # 转换 deadline
+                      deadline_iso = parse_deadline_to_iso(deadline_str, tz)
+                      if not deadline_iso:
+                          continue
+                      
+                      # 转换 abstract deadline
+                      abstract_iso = None
+                      if abstract_str:
+                          abstract_iso = parse_deadline_to_iso(abstract_str, tz)
                       
                       conferences.append({
-                          'id': conf_id,
+                          'id': f"{conf_id}-{len(conferences)}" if len(timeline) > 1 else conf_id,
                           'title': title,
                           'description': description,
                           'category': category,
                           'category_name': CATEGORIES.get(category, category),
                           'year': year,
-                          'deadline': deadline_info,
-                          'abstract_deadline': abs_info,
-                          'comment': comment_str,
+                          'deadline': deadline_iso,
+                          'deadline_raw': deadline_str,
+                          'abstract_deadline': abstract_iso,
+                          'abstract_deadline_raw': abstract_str,
+                          'comment': comment,
                           'date': date_str,
-                          'place': place_str,
-                          'link': link_str,
-                          'rank': {
-                              'ccf': ccf_match.group(1) if ccf_match else '',
-                              'core': core_match.group(1) if core_match else '',
-                              'thcpl': thcpl_match.group(1) if thcpl_match else '',
-                          },
-                          'dblp': dblp_match.group(1) if dblp_match else ''
+                          'place': place,
+                          'link': link,
+                          'timezone': tz,
+                          'rank': rank,
+                          'dblp': dblp
                       })
               
               return conferences
@@ -242,7 +208,7 @@ jobs:
               for file_info in yml_files:
                   try:
                       yaml_text = fetch(file_info['download_url']).text
-                      conferences = parse_yaml(yaml_text, cat)
+                      conferences = parse_yaml_file(yaml_text, cat)
                       
                       if conferences:
                           all_conferences.extend(conferences)
@@ -260,14 +226,17 @@ jobs:
           upcoming = []
           for conf in all_conferences:
               try:
-                  deadline_utc = datetime.fromisoformat(conf['deadline']['utc'])
+                  deadline = datetime.fromisoformat(conf['deadline'])
+                  # deadline 已经是 UTC+8，需要转回 UTC 比较
+                  deadline_utc = deadline.astimezone(timezone.utc)
                   if deadline_utc > now:
                       upcoming.append(conf)
               except Exception as e:
                   print(f"Warning: Could not parse deadline for {conf['id']}: {e}")
                   upcoming.append(conf)  # 解析失败也保留
 
-          upcoming.sort(key=lambda x: x['deadline']['utc'])
+          # 按截稿时间排序（UTC+8 时间字符串可直接排序）
+          upcoming.sort(key=lambda x: x['deadline'])
 
           # 输出统计
           print(f"\n{'='*60}")
@@ -279,7 +248,7 @@ jobs:
           print(f"\nBy category:")
           for cat, count in sorted(stats.items()):
               if count > 0:
-                  print(f"  {cat:3s} ({CATEGORIES[cat][:20]:20s}): {count:3d}")
+                  print(f"  {cat:3s} ({CATEGORIES[cat][:25]:25s}): {count:3d}")
           
           if parse_errors:
               print(f"\n⚠️ Parse errors ({len(parse_errors)}):")
@@ -294,7 +263,8 @@ jobs:
                   'generated_at': now.isoformat(),
                   'total_conferences': len(all_conferences),
                   'upcoming_count': len(upcoming),
-                  'categories': CATEGORIES,
+                  'categories': list(CATEGORIES.keys()),
+                  'category_names': CATEGORIES,
                   'source': 'https://github.com/ccfddl/ccf-deadlines'
               },
               'conferences': upcoming
