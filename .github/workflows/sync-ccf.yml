@@ -181,7 +181,7 @@ jobs:
                           'category': category,
                           'category_name': CATEGORIES.get(category, category),
                           'year': year,
-                          'conference_year': conference_year,  # 会议召开年份
+                          'conference_year': conference_year,
                           'deadline': deadline_iso,
                           'deadline_raw': deadline_str,
                           'abstract_deadline': abstract_iso,
@@ -233,26 +233,16 @@ jobs:
                       parse_errors.append(f"{cat}/{file_info['name']}: {e}")
                       print(f"   ❌ {file_info['name']}: {e}")
 
-          # ========== 过滤逻辑 ==========
-          # 保留当前年份（2026）及以后召开的会议
-          current_year = datetime.now().year  # 2026
-          
-          filtered = []
-          for conf in all_conferences:
-              conf_year = conf.get('conference_year') or conf.get('year')
-              if conf_year and conf_year >= current_year:
-                  filtered.append(conf)
-
+          # ========== 不过滤，展示所有会议 ==========
           # 按截稿时间排序
-          filtered.sort(key=lambda x: x['deadline'])
+          all_conferences.sort(key=lambda x: x['deadline'])
 
           # 输出统计
           print(f"\n{'='*60}")
           print(f"📊 STATISTICS")
           print(f"{'='*60}")
-          print(f"Total parsed:     {len(all_conferences)}")
-          print(f"Filtered (>= {current_year}): {len(filtered)}")
-          print(f"Parse errors:     {len(parse_errors)}")
+          print(f"Total conferences: {len(all_conferences)}")
+          print(f"Parse errors:      {len(parse_errors)}")
           print(f"\nBy category:")
           for cat, count in sorted(stats.items()):
               if count > 0:
@@ -270,19 +260,17 @@ jobs:
               'meta': {
                   'generated_at': datetime.now(timezone.utc).isoformat(),
                   'total_conferences': len(all_conferences),
-                  'upcoming_count': len(filtered),
-                  'current_year': current_year,
                   'categories': list(CATEGORIES.keys()),
                   'category_names': CATEGORIES,
                   'source': 'https://github.com/ccfddl/ccf-deadlines'
               },
-              'conferences': filtered
+              'conferences': all_conferences
           }
 
           with open('dist/deadlines.json', 'w', encoding='utf-8') as f:
               json.dump(output, f, ensure_ascii=False, indent=2)
 
-          print(f"\n✅ Output: dist/deadlines.json ({len(filtered)} conferences)")
+          print(f"\n✅ Output: dist/deadlines.json ({len(all_conferences)} conferences)")
           PYEOF
 
       - name: Deploy to GitHub Pages
